@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/pm990320/agent-hooks/compare/v0.4.0...v0.5.0) (2026-05-10)
+
+
+### Features
+
+* add first-class Biome detection ([3106fa3](https://github.com/pm990320/agent-hooks/commit/3106fa3ff8a19c19ce3c3fb580644ddcb692051a))
+* add Hermes Agent handler and clamp hook payload paths ([6ccec96](https://github.com/pm990320/agent-hooks/commit/6ccec96f9f4f54f60f98c0629cc3611be6a268ed))
+
+
+### Bug Fixes
+
+* emit agent hook feedback on stderr ([f7b3014](https://github.com/pm990320/agent-hooks/commit/f7b30149c947e120fe983dd2423818adfd94f2ad))
+* quiet successful agent hooks ([38580f1](https://github.com/pm990320/agent-hooks/commit/38580f1a3d6c685cfdc64a98fd76959834d3f614))
+* skip non-file codex tool hooks ([b1567db](https://github.com/pm990320/agent-hooks/commit/b1567dbc5e113fe3df1eb416dfdaabcc99fe5d02))
+* support shallow CI changed scope ([3b9d3a2](https://github.com/pm990320/agent-hooks/commit/3b9d3a2b5a707f45d927dab1767bde62bfe9be8e))
+
 ## [0.4.0](https://github.com/pm990320/agent-hooks/compare/v0.3.3...v0.4.0) (2026-04-24)
 
 
