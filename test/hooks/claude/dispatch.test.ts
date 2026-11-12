@@ -213,6 +213,57 @@ describe("dispatchClaudeHook", () => {
     expect(calls[0]?.command).toBe("echo smoke");
   });
 
+  test("skips a step whose glob matches none of the edited files", async () => {
+    const config = ConfigSchema.parse({
+      steps: {
+        test: {
+          run: { files: "vitest related {files}", project: "vitest run" },
+          files: "src/**/*.ts",
+        },
+      },
+      pipelines: { "agent-edit": { steps: ["test"] } },
+      agents: {
+        "claude-code": {
+          hooks: {
+            PostToolUse: [{ matcher: "Edit", pipeline: "agent-edit" }],
+            Stop: [{ pipeline: "agent-edit" }],
+          },
+        },
+      },
+    });
+    const edit = recordExec();
+    const edited = await dispatchClaudeHook({
+      hookName: "PostToolUse",
+      input: { toolName: "Edit", files: ["scripts/build.sh"], hookEventName: null },
+      config,
+      cwd: "/repo",
+      env: {},
+      git: stubGit(["scripts/build.sh"]),
+      exec: edit.exec,
+      reporter: captureReporter(),
+    });
+    expect(edited.exitCode).toBe(0);
+    expect(edit.calls).toHaveLength(0);
+    expect(edited.pipelineResult?.steps[0]?.result?.reason).toBe(
+      "no files matched src/**/*.ts",
+    );
+
+    // No payload paths (Stop) → git "changed" fallback is not a
+    // selection, so the project variant still runs.
+    const stop = recordExec();
+    await dispatchClaudeHook({
+      hookName: "Stop",
+      input: { toolName: null, files: [], hookEventName: "Stop" },
+      config,
+      cwd: "/repo",
+      env: {},
+      git: stubGit(["scripts/build.sh"]),
+      exec: stop.exec,
+      reporter: captureReporter(),
+    });
+    expect(stop.calls.map((call) => call.command)).toEqual(["vitest run"]);
+  });
+
   test("propagates non-zero pipeline exit codes", async () => {
     const reporter = captureReporter();
     const { exec } = recordExec(7);

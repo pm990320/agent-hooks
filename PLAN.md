@@ -682,7 +682,8 @@ steps:
 | Situation | Variant used |
 |---|---|
 | File list present after filtering | `files` (falls back to `project` if `files` not defined) |
-| `--all` flag passed, or `scope: project`, or file list empty and `fallback` not set | `project` (falls back to `files` with `{files}` empty → may error) |
+| `scope: project`, or file list empty with no `fallback` and no file selection made (bare `ci` / `run`) | `project` (falls back to `files` with `{files}` empty → may error) |
+| File list empty after a file selection (`--files`, `--staged`, `--changed`, `--all`, git hook, agent hook payload), no `fallback` | none: skip with "no files matched <glob>" |
 | Only one variant defined | That one, always |
 | String form | Treated as `files` variant; also used for `project` if no other variant defined |
 

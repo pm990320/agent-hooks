@@ -640,6 +640,78 @@ describe("runHookCommand — claude agent", () => {
   });
 });
 
+describe("runHookCommand — claude edit outside a step's glob", () => {
+  function scopedClaudeLoaded(): LoadedConfig {
+    return {
+      config: ConfigSchema.parse({
+        steps: {
+          test: {
+            run: {
+              files: "vitest related --run {files}",
+              project: "vitest run --coverage",
+            },
+            files: "src/**/*.ts",
+          },
+        },
+        pipelines: { "agent-edit": { steps: ["test"] } },
+        agents: {
+          "claude-code": {
+            hooks: {
+              PostToolUse: [{ matcher: "Edit|Write", pipeline: "agent-edit" }],
+              Stop: [{ pipeline: "agent-edit" }],
+            },
+          },
+        },
+      }),
+      sourcePath: "/repo/.config/agent-hooks.yml",
+      localPath: null,
+    };
+  }
+
+  async function runClaude(
+    hookName: string,
+    payload: unknown,
+  ): Promise<{ code: number; commands: string[] }> {
+    const commands: string[] = [];
+    const code = await runHookCommand("claude", hookName, {
+      cwd: "/repo",
+      write: () => {},
+      writeErr: () => {},
+      load: () => Promise.resolve(scopedClaudeLoaded()),
+      makeGit: () => stubGit(["scripts/build.sh"]),
+      exec: (input) => {
+        commands.push(input.command);
+        return Promise.resolve({ exitCode: 0, durationMs: 1 });
+      },
+      readStdin: fakeStdin(JSON.stringify(payload)),
+      env: {},
+    });
+    return { code, commands };
+  }
+
+  test("PostToolUse on a non-matching file skips instead of running the project", async () => {
+    const { code, commands } = await runClaude("PostToolUse", {
+      tool_name: "Edit",
+      tool_input: { file_path: "scripts/build.sh" },
+    });
+    expect(code).toBe(0);
+    expect(commands).toEqual([]);
+  });
+
+  test("PostToolUse on a matching file runs the files variant", async () => {
+    const { commands } = await runClaude("PostToolUse", {
+      tool_name: "Edit",
+      tool_input: { file_path: "src/a.ts" },
+    });
+    expect(commands).toEqual(["vitest related --run 'src/a.ts'"]);
+  });
+
+  test("Stop with no payload paths keeps the project fallback", async () => {
+    const { commands } = await runClaude("Stop", {});
+    expect(commands).toEqual(["vitest run --coverage"]);
+  });
+});
+
 describe("runHookCommand — exit-code remap opt-in", () => {
   // Pass-through is the safe default. Only agents on the opt-in list
   // (stderrFeedbackOnExit2 = true) see the 1→2 remap; every other

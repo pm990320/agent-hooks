@@ -117,6 +117,21 @@ export function pickScope(args: RunArgs): Scope {
   return "changed";
 }
 
+/**
+ * Whether the CLI flags made a file selection. `--files`, `--all`,
+ * `--staged`, and `--changed` all do. With no flag the scope defaults to
+ * `changed`, but that is not a selection: a step whose glob matches none
+ * of those files still runs its project variant, which `ci` relies on.
+ */
+export function hasFileSelection(args: RunArgs): boolean {
+  return (
+    (args.explicitFiles !== undefined && args.explicitFiles.length > 0) ||
+    args.all === true ||
+    args.staged === true ||
+    args.changed === true
+  );
+}
+
 // --- Target resolution ---------------------------------------------------
 
 /**
@@ -252,6 +267,7 @@ interface PreparedRun {
   readonly git: GitRunner;
   readonly scope: Scope;
   readonly files: readonly string[];
+  readonly filesSelected: boolean;
   readonly directives: ReturnType<typeof resolveSkipDirectives>;
   readonly promptContext: PromptContext;
 }
@@ -300,6 +316,7 @@ async function prepareRun(
     git,
     scope,
     files: resolvedFiles.files,
+    filesSelected: hasFileSelection(args),
     directives,
     promptContext: args.promptContext ?? detectPromptContext(deps.env),
   };
@@ -425,6 +442,7 @@ async function executeResolvedTarget(
       pipelineName: resolved.pipelineName,
       config: resolved.config,
       files,
+      filesSelected: prepared.filesSelected,
       cwd,
       repoRoot: prepared.repoRoot,
       env: pipelineEnv,

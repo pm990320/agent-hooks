@@ -122,6 +122,10 @@ export async function dispatchGitHook(
       pipelineName: rule.pipeline,
       config: options.config,
       files: resolved.files,
+      // A git hook always selects files (staged, changed, or all), so a
+      // step whose glob matches none of them skips rather than running
+      // its project variant.
+      filesSelected: true,
       cwd: options.cwd,
       ...(options.repoRoot ? { repoRoot: options.repoRoot } : {}),
       env: options.env,

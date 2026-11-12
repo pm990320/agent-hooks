@@ -137,6 +137,34 @@ describe("dispatchGitHook", () => {
     expect(reporter.events).toContain("pipelineEnd:pre-commit:true");
   });
 
+  test("skips a file-scoped step when no staged file matches its glob", async () => {
+    const config = ConfigSchema.parse({
+      steps: {
+        test: {
+          run: { files: "vitest related {files}", project: "vitest run" },
+          files: "src/**/*.ts",
+        },
+      },
+      pipelines: { "pre-commit": { steps: ["test"] } },
+      git: { hooks: { "pre-commit": { pipeline: "pre-commit" } } },
+    });
+    const { exec, calls } = sampleExec();
+    const result = await dispatchGitHook({
+      hookName: "pre-commit",
+      config,
+      cwd: "/repo",
+      env: {},
+      git: stubGit(["scripts/build.sh"]),
+      exec,
+      reporter: captureReporter(),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(calls).toHaveLength(0);
+    expect(result.pipelineResult?.steps[0]?.result?.reason).toBe(
+      "no files matched src/**/*.ts",
+    );
+  });
+
   test("propagates pipeline failure exit code", async () => {
     const reporter = captureReporter();
     const { exec } = sampleExec(3);

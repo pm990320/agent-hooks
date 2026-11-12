@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { ExitError } from "../../src/cli.ts";
 import {
   defaultRunDeps,
+  hasFileSelection,
   pickScope,
   registerCiCommand,
   registerRunCommand,
@@ -145,6 +146,85 @@ describe("pickScope", () => {
 
   test("empty explicit files list falls through to default", () => {
     expect(pickScope({ target: "ci", explicitFiles: [] })).toBe("changed");
+  });
+});
+
+describe("hasFileSelection", () => {
+  test("no scope flag is not a selection", () => {
+    expect(hasFileSelection({ target: "ci" })).toBe(false);
+    expect(hasFileSelection({ target: "ci", explicitFiles: [] })).toBe(false);
+  });
+
+  test("--files, --all, --staged and --changed are selections", () => {
+    expect(hasFileSelection({ target: "ci", explicitFiles: ["a.sh"] })).toBe(
+      true,
+    );
+    expect(hasFileSelection({ target: "ci", all: true })).toBe(true);
+    expect(hasFileSelection({ target: "ci", staged: true })).toBe(true);
+    expect(hasFileSelection({ target: "ci", changed: true })).toBe(true);
+  });
+});
+
+// --- Unmatched selections vs no selection --------------------------------
+
+describe("runCommand — files outside a step's glob", () => {
+  function scopedTestLoaded(): LoadedConfig {
+    return {
+      config: ConfigSchema.parse({
+        steps: {
+          test: {
+            run: {
+              files: "vitest related --run {files}",
+              project: "vitest run --coverage",
+            },
+            files: "src/**/*.ts",
+          },
+        },
+        pipelines: { ci: { steps: ["test"] } },
+      }),
+      sourcePath: "/repo/.config/agent-hooks.yml",
+      localPath: null,
+    };
+  }
+
+  function scopedFake(): Fake {
+    return fakeDeps({
+      load: () => Promise.resolve(scopedTestLoaded()),
+      makeGit: () => stubGit(["scripts/build.sh"]),
+    });
+  }
+
+  test("no scope flag runs the project variant (ci)", async () => {
+    const fake = scopedFake();
+    const code = await runCommand({ target: "ci" }, fake.deps);
+    expect(code).toBe(0);
+    expect(fake.calls.map((call) => call.command)).toEqual([
+      "vitest run --coverage",
+    ]);
+  });
+
+  test.each([
+    ["--files", { explicitFiles: ["scripts/build.sh"] }],
+    ["--changed", { changed: true }],
+    ["--staged", { staged: true }],
+    ["--all", { all: true }],
+  ] as const)("%s with no matching file skips the step", async (_flag, scope) => {
+    const fake = scopedFake();
+    const code = await runCommand({ target: "test", ...scope }, fake.deps);
+    expect(code).toBe(0);
+    expect(fake.calls).toHaveLength(0);
+    expect(fake.stdout()).toContain("no files matched src/**/*.ts");
+  });
+
+  test("--files with a matching file runs the files variant", async () => {
+    const fake = scopedFake();
+    await runCommand(
+      { target: "test", explicitFiles: ["src/a.ts", "scripts/build.sh"] },
+      fake.deps,
+    );
+    expect(fake.calls.map((call) => call.command)).toEqual([
+      "vitest related --run 'src/a.ts'",
+    ]);
   });
 });
 
