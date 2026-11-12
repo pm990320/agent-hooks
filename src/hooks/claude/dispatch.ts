@@ -96,6 +96,7 @@ export async function dispatchClaudeHook(
       pipelineName: rule.pipeline,
       config: options.config,
       files: resolved.files,
+      filesSelected: resolved.scope === "explicit",
       cwd: options.cwd,
       ...(options.repoRoot ? { repoRoot: options.repoRoot } : {}),
       env: options.env,

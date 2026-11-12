@@ -335,6 +335,79 @@ describe("runStep — empty file list", () => {
   });
 });
 
+describe("runStep — empty file list after a file selection", () => {
+  test("skips instead of running the project variant", async () => {
+    const step = parseStep({
+      run: { files: "vitest related {files}", project: "vitest run" },
+      files: "src/**/*.ts",
+    });
+    const { calls, exec } = recordExec();
+    const result = await runStep(
+      baseOpts({ step, files: [], filesSelected: true }),
+      exec,
+    );
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("no files matched src/**/*.ts");
+    expect(result.exitCode).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("says no files were selected when the step has no glob", async () => {
+    const step = parseStep({
+      run: { files: "vitest related {files}", project: "vitest run" },
+    });
+    const { calls, exec } = recordExec();
+    const result = await runStep(
+      baseOpts({ step, files: [], filesSelected: true }),
+      exec,
+    );
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("no files selected");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("still runs fallback: when defined", async () => {
+    const step = parseStep({
+      run: { files: "vitest related {files}", project: "vitest run" },
+      files: "src/**/*.ts",
+      fallback: "echo nothing to test",
+    });
+    const { calls, exec } = recordExec();
+    const result = await runStep(
+      baseOpts({ step, files: [], filesSelected: true }),
+      exec,
+    );
+    expect(result.status).toBe("passed");
+    expect(calls.map((call) => call.command)).toEqual(["echo nothing to test"]);
+  });
+
+  test("a non-empty selection still runs the files variant", async () => {
+    const step = parseStep({
+      run: { files: "vitest related {files}", project: "vitest run" },
+      files: "src/**/*.ts",
+    });
+    const { calls, exec } = recordExec();
+    await runStep(
+      baseOpts({ step, files: ["src/a.ts"], filesSelected: true }),
+      exec,
+    );
+    expect(calls.map((call) => call.command)).toEqual([
+      "vitest related 'src/a.ts'",
+    ]);
+  });
+
+  test("scope: project steps still run on a selection", async () => {
+    const step = parseStep({
+      run: { project: "tsc --noEmit" },
+      scope: "project",
+      files: "src/**/*.ts",
+    });
+    const { calls, exec } = recordExec();
+    await runStep(baseOpts({ step, files: [], filesSelected: true }), exec);
+    expect(calls.map((call) => call.command)).toEqual(["tsc --noEmit"]);
+  });
+});
+
 // --- runStep: per-file mode ---------------------------------------------
 
 describe("runStep — per-file mode", () => {

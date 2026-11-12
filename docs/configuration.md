@@ -166,7 +166,7 @@ steps:
 | `run` | string \| object | *required* | Command, or `{ files, project }` variants |
 | `files` | glob | — | Filter incoming file lists to this pattern |
 | `fix` | string | — | Command form used by `agent-hooks fix <step>` |
-| `fallback` | string | — | Command when file list is empty after filter |
+| `fallback` | string | — | Command when file list is empty after filter. Runs both with and without a file selection, and takes precedence over the `project` variant |
 | `scope` | `project` \| `files` | `files` | Force the invocation scope |
 | `invocation` | enum | `args` | See [pipelines-and-steps](./pipelines-and-steps.md#invocation-modes) |
 | `chunk` | number | — | Max files per invocation (mode: `xargs`) |

@@ -22,6 +22,11 @@ export interface PipelineOptions {
   readonly files: readonly string[];
   /** True when the caller asked for a project-scope run (e.g. `--all`). */
   readonly projectForced?: boolean;
+  /**
+   * True when `files` came from an explicit selection (scope flag, git
+   * hook scope, agent hook payload). See `StepRunOptions.filesSelected`.
+   */
+  readonly filesSelected?: boolean;
   readonly cwd: string;
   readonly repoRoot?: string;
   readonly env?: Record<string, string>;
@@ -271,6 +276,7 @@ async function runOneStep(
       step: entry.step,
       files: filtered,
       projectForced: options.projectForced ?? false,
+      filesSelected: options.filesSelected ?? false,
       cwd: options.cwd,
       ...(options.repoRoot ? { repoRoot: options.repoRoot } : {}),
       output: outputMode,

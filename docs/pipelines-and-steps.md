@@ -157,11 +157,23 @@ Which variant runs depends on the file list:
 | Situation | Variant |
 |---|---|
 | File list present after filtering | `files` |
-| `--all`, `scope: project`, or empty file list with no fallback | `project` |
+| `scope: project` | `project` |
+| Empty file list, no fallback, and no file selection made (bare `ci` / `run`) | `project` |
+| Empty file list, no fallback, after a file selection | none: the step skips |
 | Only one variant defined | That one |
 | String form | Treated as `files`, also used as `project` if no other variant |
 
 When `project` runs, `{files}` is not substituted.
+
+A **file selection** is any of `--files`, `--staged`, `--changed`, `--all`,
+a git hook (whose scope selects staged, changed, or all files), or the
+edited paths in an agent hook payload. If none of the selected files match
+the step's `files:` glob, the step skips with `no files matched <glob>`:
+editing `scripts/build.sh` must not run the whole test suite. With no scope
+flag, `ci` and `run` default to the changed files but don't count as a
+selection, so a step with no matching changes still runs its `project`
+variant. That is the CI behaviour. An agent hook with no payload paths
+(e.g. `Stop`) works the same way.
 
 ## Per-file linting
 
@@ -468,7 +480,7 @@ are too varied to paper over.
 
 | Mode | Empty list |
 |---|---|
-| `args`, `stdin`, `xargs`, `per-file`, `per-directory` | Skip (exit 0) unless `fallback:` defined |
+| `args`, `stdin`, `xargs`, `per-file`, `per-directory` | Run `fallback:` if defined; else, with no file selection, the object-form `project` variant; else skip (exit 0) |
 | `per-marker-dir` | Skip (exit 0) if no marker roots are found |
 | `glob` | Run with empty glob (tool decides) |
 | `project` | Always runs |

@@ -34,6 +34,15 @@ export interface StepRunOptions {
   readonly files: readonly string[];
   /** True when the caller forces a project-scope run (e.g. `--all`). */
   readonly projectForced?: boolean;
+  /**
+   * True when the caller made a file selection: `--files`, `--staged`,
+   * `--changed`, `--all`, a git hook's scope, or the paths in an agent
+   * hook payload. An empty `files` list then means "nothing selected
+   * matched this step", and the step skips (or runs `fallback:`) instead
+   * of running its project variant. False or omitted (a bare `ci` / `run`
+   * with no scope flag) keeps the project-variant fallback.
+   */
+  readonly filesSelected?: boolean;
   readonly cwd: string;
   readonly repoRoot?: string;
   readonly env?: Record<string, string>;
@@ -536,6 +545,9 @@ export async function runStep(
   }
 
   // File-scoped modes: if the list is empty, try fallback → project → skip.
+  // The project variant only stands in when no file selection was made
+  // at all; a selection that matched nothing means there is nothing for
+  // this step to check, so it skips.
   if (runOptions.files.length === 0) {
     if (step.fallback) {
       const command = applyTemplate(step.fallback, templateCtx(runOptions, []));
@@ -544,6 +556,14 @@ export async function runStep(
         [invocation],
         startedAt,
         onFailure,
+        areaDecision,
+        effectiveFiles,
+      );
+    }
+    if (options.filesSelected) {
+      return skipped(
+        step.files ? `no files matched ${step.files}` : "no files selected",
+        startedAt,
         areaDecision,
         effectiveFiles,
       );

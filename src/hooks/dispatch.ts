@@ -126,6 +126,11 @@ export async function dispatchAgentHook(
       pipelineName: rule.pipeline,
       config: options.config,
       files: resolved.files,
+      // Payload paths are a selection: a step whose glob matches none of
+      // the edited files skips. The git "changed" fallback (no payload
+      // paths, e.g. Stop) is not, so those steps keep their project run.
+      // In a monorepo `resolvedFiles` is routed from the same payload.
+      filesSelected: options.input.files.length > 0,
       cwd: options.cwd,
       ...(options.repoRoot ? { repoRoot: options.repoRoot } : {}),
       env: options.env,
