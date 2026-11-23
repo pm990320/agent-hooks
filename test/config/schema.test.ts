@@ -420,3 +420,27 @@ describe("ConfigSchema — root", () => {
     expect(config.$schema).toBe("./node_modules/agent-hooks/schema.json");
   });
 });
+
+describe("StepSchema — sharding", () => {
+  test("accepts shard modes and a positive weight", () => {
+    const step = StepSchema.parse({ run: "vitest --shard={shard}", shard: "native", weight: 90 });
+    expect(step.shard).toBe("native");
+    expect(step.weight).toBe(90);
+    expect(
+      StepSchema.parse({ run: "x {file}", invocation: "per-file", shard: "targets" }).shard,
+    ).toBe("targets");
+  });
+
+  test("rejects shard: targets on a single-invocation step", () => {
+    const parsed = StepSchema.safeParse({ run: "x", invocation: "project", shard: "targets" });
+    expect(parsed.success).toBe(false);
+    expect(JSON.stringify(parsed.error?.issues)).toContain(
+      "shard: targets needs invocation per-file, per-directory or per-marker-dir",
+    );
+  });
+
+  test("rejects a non-positive weight and unknown modes", () => {
+    expect(StepSchema.safeParse({ run: "x", weight: 0 }).success).toBe(false);
+    expect(StepSchema.safeParse({ run: "x", shard: "files" }).success).toBe(false);
+  });
+});

@@ -166,4 +166,30 @@ describe("monorepo lifecycle", () => {
     expect(doctor.exitCode).toBe(0);
     expect(doctor.stdout).toContain("✓ pre-commit");
   });
+
+  test("ci --shard splits root and workspace steps with nothing lost or doubled", async () => {
+    const plan = await runCli(["ci", "--all", "--shard-plan", "2"], {
+      cwd: fixture.cwd,
+    });
+    expect(plan.exitCode).toBe(0);
+    expect(plan.stdout).toContain("shard plan for ci: 2 shard(s), 3 unit(s)");
+    expect(plan.stdout).toContain(".:lint");
+    expect(plan.stdout).toContain("services/service-a:lint");
+    expect(plan.stdout).toContain("services/service-b:lint");
+    expect(plan.stdout).not.toContain("ROOT cwd=");
+
+    let combined = "";
+    for (const shard of ["1/2", "2/2"]) {
+      const result = await runCli(["ci", "--all"], {
+        cwd: fixture.cwd,
+        env: { AGENT_HOOKS_SHARD: shard },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(`⧉ shard ${shard} of ci`);
+      combined += result.stdout;
+    }
+    for (const marker of ["ROOT cwd=", "SERVICE_A_LINT cwd=", "SERVICE_B_LINT cwd="]) {
+      expect(combined.split(marker)).toHaveLength(2);
+    }
+  });
 });

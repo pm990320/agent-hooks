@@ -104,3 +104,7 @@ jobs:
       - uses: pm990320/agent-hooks@v1
       - run: agent-hooks ci
 ```
+
+To split a long `ci` across parallel matrix jobs, set
+`AGENT_HOOKS_SHARD: ${{ matrix.shard }}/N` on the `agent-hooks ci` step.
+See [sharding](./sharding.md#github-actions-matrix) for a full example.

@@ -91,7 +91,7 @@ calls. Takes the same flags as [`run`](#run).
 
 ```
 agent-hooks ci [--jobs <n>] [--force-gates] [--skip <names>]
-               [--only <names>]
+               [--only <names>] [--shard <i>/<n>] [--shard-plan [n]]
 ```
 
 In monorepo mode, `ci` means "what CI would run for the whole repo":
@@ -109,6 +109,7 @@ agent-hooks run <target> [-f|--files <paths...>]
                          [--skip <names>] [--only <names>]
                          [-j|--jobs <n>] [--force-gates]
                          [--allow-outside-repo] [--no-prompts]
+                         [--shard <i>/<n>] [--shard-plan [n]]
 ```
 
 - `<target>` — pipeline or step name. If it's a step, agent-hooks
@@ -124,6 +125,10 @@ agent-hooks run <target> [-f|--files <paths...>]
 - `--allow-outside-repo` — allow `--files` paths that escape the
   repo root (a footgun; leave off unless you know you need it)
 - `--no-prompts` — suppress per-step `agent-hooks:next-step` blocks
+- `--shard <i>/<n>` — run only shard `i` of `n` (1-based); every step
+  or target lands in exactly one shard. See [sharding](./sharding.md)
+- `--shard-plan [n]` — print what every shard would run and exit
+  without running; `n` defaults to the total from `--shard`
 
 In monorepo mode:
 
@@ -262,6 +267,7 @@ agent-hooks schema > schema.json
 |---|---|
 | `AGENT_HOOKS_SKIP` | Comma-separated step names to skip, or `1`/`true`/`yes`/`all` to skip the whole pipeline |
 | `AGENT_HOOKS_ONLY` | Comma-separated whitelist of step names |
+| `AGENT_HOOKS_SHARD` | `<i>/<n>`: same as `--shard` (the flag wins). Empty means unsharded |
 | `AGENT_HOOKS_CONTEXT` | Force the prompt context: `agent`, `ci`, or `tty` |
 | `AGENT_HOOKS_DEBUG` | When `1`, prints extra diagnostics from the hook dispatcher |
 | `AGENT_HOOKS_STDIN_MAX` | Raise the 16 MB cap on hook input bytes |

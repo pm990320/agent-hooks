@@ -447,6 +447,9 @@ the agent actually edited `package.json` — not on every edit.
 | `{repo_root}` | any | Repo root alias |
 | `{git_root}` | any | Repo root alias kept for compatibility |
 | `{env.NAME}` | any | Env var passthrough |
+| `{shard}` | any | Current shard as `i/n` (`1/1` when not sharded). See [sharding](./sharding.md) |
+| `{shard_index}` | any | Current shard index, 1-based |
+| `{shard_total}` | any | Shard count |
 
 ## Symlinks
 
@@ -523,6 +526,8 @@ pipelines:
 - `parallel: false` *(default)* — run in order, fail-fast
 - `parallel: true` — run concurrently, fail-fast unless `continue-on-error: true`
 - Concurrency cap: `min(steps, cpus)` by default, override with `--jobs N`
+- Across machines: `--shard i/n` runs one share of the pipeline in each
+  CI job. See [sharding](./sharding.md)
 
 ### Tag filtering
 

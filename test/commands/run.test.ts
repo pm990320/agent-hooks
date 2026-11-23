@@ -8,6 +8,7 @@ import {
   registerCiCommand,
   registerRunCommand,
   registerShortcutCommand,
+  resolveShardRequest,
   resolveTarget,
   runCommand,
   type RunArgs,
@@ -929,5 +930,222 @@ describe("defaultRunDeps", () => {
       stdin: "hello\n",
     });
     expect(result.exitCode).toBe(0);
+  });
+});
+
+// --- Sharding ------------------------------------------------------------
+
+describe("resolveShardRequest", () => {
+  test("no flag and no env is an unsharded run", () => {
+    expect(resolveShardRequest({}, {})).toEqual({ spec: null, planTotal: null });
+    expect(resolveShardRequest({}, { AGENT_HOOKS_SHARD: " " })).toEqual({
+      spec: null,
+      planTotal: null,
+    });
+  });
+
+  test("the flag wins over the env var", () => {
+    expect(
+      resolveShardRequest({ shard: "1/2" }, { AGENT_HOOKS_SHARD: "3/3" }).spec,
+    ).toEqual({ index: 1, total: 2 });
+    expect(resolveShardRequest({}, { AGENT_HOOKS_SHARD: "3/3" }).spec).toEqual({
+      index: 3,
+      total: 3,
+    });
+  });
+
+  test("--shard-plan takes a count, or the total from --shard", () => {
+    expect(resolveShardRequest({ shardPlan: "4" }, {}).planTotal).toBe(4);
+    expect(
+      resolveShardRequest({ shardPlan: true, shard: "2/5" }, {}).planTotal,
+    ).toBe(5);
+    expect(() => resolveShardRequest({ shardPlan: true }, {})).toThrow(
+      "--shard-plan needs a shard count",
+    );
+  });
+});
+
+describe("runCommand — sharding", () => {
+  function shardLoaded(): LoadedConfig {
+    return {
+      config: ConfigSchema.parse({
+        steps: {
+          lint: { run: "lint .", invocation: "project", weight: 2 },
+          typecheck: { run: "tsc", invocation: "project", weight: 50 },
+          unit: {
+            run: "vitest run --shard={shard}",
+            invocation: "project",
+            shard: "native",
+            weight: 120,
+          },
+          e2e: { run: "playwright test", invocation: "project", weight: 340 },
+          sh: {
+            run: "shellcheck {file}",
+            files: "**/*.sh",
+            invocation: "per-file",
+          },
+          slow: { run: "slow", invocation: "project", tags: ["slow"] },
+        },
+        pipelines: {
+          ci: { steps: ["lint", "typecheck", "unit", "e2e", "sh"] },
+          par: { steps: ["lint", "typecheck", "e2e"], parallel: true },
+          tagged: { steps: ["lint", "slow"], "exclude-tags": ["slow"] },
+        },
+      }),
+      sourcePath: "/repo/.config/agent-hooks.yml",
+      localPath: null,
+    };
+  }
+
+  function shardFake(env: Record<string, string> = {}): Fake {
+    return fakeDeps({
+      load: () => Promise.resolve(shardLoaded()),
+      makeGit: () => stubGit(["a.sh", "b.sh", "c.sh", "d.sh", "src/x.ts"]),
+      env,
+    });
+  }
+
+  test("each check runs in exactly one shard across all shards", async () => {
+    const commands: string[] = [];
+    for (const index of [1, 2, 3]) {
+      const fake = shardFake();
+      const code = await runCommand(
+        { target: "ci", all: true, shard: `${String(index)}/3` },
+        fake.deps,
+      );
+      expect(code).toBe(0);
+      expect(fake.stdout()).toContain(`⧉ shard ${String(index)}/3 of ci (plan `);
+      commands.push(...fake.calls.map((call) => call.command));
+    }
+    expect(commands.sort()).toEqual([
+      "lint .",
+      "playwright test",
+      "shellcheck 'a.sh'",
+      "shellcheck 'b.sh'",
+      "shellcheck 'c.sh'",
+      "shellcheck 'd.sh'",
+      "tsc",
+      "vitest run --shard=1/3",
+      "vitest run --shard=2/3",
+      "vitest run --shard=3/3",
+    ]);
+  });
+
+  test("the summary names steps that ran elsewhere", async () => {
+    const fake = shardFake({ AGENT_HOOKS_SHARD: "2/3" });
+    await runCommand({ target: "ci", all: true }, fake.deps);
+    expect(fake.stdout()).toMatch(/⧉ e2e — elsewhere \(on shard 1\/3\)/);
+    expect(fake.stdout()).toContain("on other shards: ");
+  });
+
+  test("every shard prints the same plan fingerprint", async () => {
+    const prints = new Set<string>();
+    for (const index of [1, 2]) {
+      const fake = shardFake();
+      await runCommand({ target: "ci", all: true, shard: `${String(index)}/2` }, fake.deps);
+      prints.add(/\(plan ([0-9a-f]{8})\)/.exec(fake.stdout())?.[1] ?? "");
+    }
+    expect(prints.size).toBe(1);
+  });
+
+  test("--shard-plan prints every shard and runs nothing", async () => {
+    const fake = shardFake();
+    const code = await runCommand(
+      { target: "ci", all: true, shardPlan: "2" },
+      fake.deps,
+    );
+    expect(code).toBe(0);
+    expect(fake.calls).toHaveLength(0);
+    const out = fake.stdout();
+    expect(out).toContain("shard plan for ci: 2 shard(s), 7 unit(s), 1 native step(s)");
+    expect(out).toContain("shard 1/2");
+    expect(out).toContain("shard 2/2");
+    expect(out).toContain("sh [a.sh]");
+    expect(out).toContain("unit (native: --shard=2/2)");
+  });
+
+  test("--skip, --only and tag filters apply before planning", async () => {
+    const fake = shardFake();
+    await runCommand(
+      { target: "ci", all: true, shardPlan: "2", skip: ["e2e"], only: ["lint", "e2e", "typecheck"] },
+      fake.deps,
+    );
+    expect(fake.stdout()).toContain("2 unit(s), 0 native step(s)");
+    expect(fake.stdout()).not.toContain("e2e");
+
+    const tagged = shardFake();
+    await runCommand({ target: "tagged", shardPlan: "2" }, tagged.deps);
+    expect(tagged.stdout()).toContain("1 unit(s)");
+    expect(tagged.stdout()).not.toContain("  slow");
+  });
+
+  test("a skip-all directive leaves nothing to plan", async () => {
+    const fake = shardFake({ AGENT_HOOKS_SKIP: "1" });
+    await runCommand({ target: "ci", shardPlan: "2" }, fake.deps);
+    expect(fake.stdout()).toContain("0 unit(s), 0 native step(s)");
+  });
+
+  test("parallel pipelines run the shard's steps in parallel", async () => {
+    const fake = shardFake();
+    const code = await runCommand(
+      { target: "par", shard: "2/2", jobs: 2 },
+      fake.deps,
+    );
+    expect(code).toBe(0);
+    expect(fake.calls.map((call) => call.command).sort()).toEqual(["lint .", "tsc"]);
+  });
+
+  test("a single step target can be sharded", async () => {
+    const fake = shardFake();
+    await runCommand({ target: "e2e", shard: "2/2" }, fake.deps);
+    expect(fake.calls).toHaveLength(0);
+    expect(fake.stdout()).toContain("on other shards: e2e → 1");
+  });
+
+  test("a bad shard spec exits 2 before loading config", async () => {
+    const fake = shardFake();
+    expect(await runCommand({ target: "ci", shard: "4/3" }, fake.deps)).toBe(2);
+    expect(fake.stderr()).toContain("--shard: index must be between 1 and 3");
+    const env = shardFake({ AGENT_HOOKS_SHARD: "x" });
+    expect(await runCommand({ target: "ci" }, env.deps)).toBe(2);
+    expect(env.stderr()).toContain("AGENT_HOOKS_SHARD must look like");
+  });
+
+  test("other errors from shard parsing are rethrown", async () => {
+    const fake = shardFake();
+    const env = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("boom");
+        },
+        has() {
+          return true;
+        },
+      },
+    ) as Record<string, string>;
+    await expect(runCommand({ target: "ci" }, { ...fake.deps, env })).rejects.toThrow(
+      "boom",
+    );
+  });
+
+  test("the CLI passes --shard and --shard-plan through", async () => {
+    const program = new Command().exitOverride();
+    let out = "";
+    registerCiCommand(program, {
+      cwd: "/repo",
+      write: (text) => {
+        out += text;
+      },
+      writeErr: () => {},
+      load: () => Promise.resolve(shardLoaded()),
+      makeGit: () => stubGit(["a.sh"]),
+      exec: () => Promise.resolve({ exitCode: 0, durationMs: 1 }),
+      env: {},
+    });
+    await program.parseAsync(["ci", "--all", "--shard", "1/2", "--shard-plan"], {
+      from: "user",
+    });
+    expect(out).toContain("shard plan for ci: 2 shard(s)");
   });
 });

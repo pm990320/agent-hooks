@@ -34,17 +34,41 @@ import { stepDurationSeconds } from "../reporters/format.ts";
 import {
   createGitRunner,
   defaultSpawner,
+  filterByGlob,
   PathOutsideRepoError,
   resolveFiles,
   type GitRunner,
   type Scope,
 } from "../runners/files.ts";
-import { runPipeline } from "../runners/pipeline.ts";
+import {
+  applyFilters,
+  resolveSteps,
+  runPipeline,
+} from "../runners/pipeline.ts";
+import {
+  assignmentFor,
+  buildShardPlan,
+  parseShardSpec,
+  parseShardTotal,
+  renderShardBanner,
+  renderShardPlan,
+  SHARD_ENV_VAR,
+  ShardSpecError,
+  stepShardMode,
+  stepWeight,
+  type PlannedStep,
+  type ShardAssignment,
+  type ShardSpec,
+} from "../runners/shard.ts";
 import { registerChild } from "../runners/process-registry.ts";
 import { routeRepoFiles } from "../runners/workspace-paths.ts";
 import { resolveSkipDirectives } from "../runners/skip-directives.ts";
 import { spawnProcess, streamToText } from "../runners/spawn.ts";
-import type { ExecFn, ExecOutputMode } from "../runners/step.ts";
+import {
+  resolveShardTargets,
+  type ExecFn,
+  type ExecOutputMode,
+} from "../runners/step.ts";
 import type { StepOutcome } from "../runners/pipeline.ts";
 import { writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -100,6 +124,16 @@ export interface RunArgs {
    * the CLI help — most users never need this.
    */
   readonly allowOutsideRepo?: boolean;
+  /**
+   * `<index>/<total>` (1-based): run only this shard's share of the
+   * pipeline. Falls back to the `AGENT_HOOKS_SHARD` env var.
+   */
+  readonly shard?: string;
+  /**
+   * Print the plan for every shard and exit without running. `true`
+   * takes the shard count from `shard`; a string is the shard count.
+   */
+  readonly shardPlan?: string | true;
 }
 
 // --- Scope resolution ----------------------------------------------------
@@ -279,6 +313,19 @@ interface ExecuteTargetOptions {
   readonly git: GitRunner;
   readonly files: readonly string[];
   readonly prepared: PreparedRun;
+  /** Shard plan key prefix: "" (single config), "." (root) or a workspace path. */
+  readonly group: string;
+  /** This shard's share of the context's pipeline, when sharded. */
+  readonly shard?: ShardAssignment;
+}
+
+function effectiveSkipSet(
+  prepared: PreparedRun,
+  config: Config,
+): ReadonlySet<string> {
+  return prepared.directives.skipAll
+    ? new Set(Object.keys(config.steps))
+    : prepared.directives.skip;
 }
 
 async function prepareRun(
@@ -334,9 +381,8 @@ async function executeResolvedTarget(
   const reporter =
     deps.reporter ?? pickReporter({ env: deps.env, write: deps.write });
 
-  let effectiveSkip = prepared.directives.skip;
+  const effectiveSkip = effectiveSkipSet(prepared, resolved.config);
   if (prepared.directives.skipAll) {
-    effectiveSkip = new Set(Object.keys(resolved.config.steps));
     deps.write(
       `  ⊘ skipping all steps (skipAll directive from ${
         prepared.directives.sources[prepared.directives.sources.length - 1]?.from
@@ -436,6 +482,17 @@ async function executeResolvedTarget(
     return lines;
   }
 
+  if (options.shard) {
+    deps.write(
+      renderShardBanner(
+        options.shard,
+        target,
+        resolved.config.pipelines[resolved.pipelineName]?.steps ?? [],
+        options.group,
+      ),
+    );
+  }
+
   reporter.pipelineStart(resolved.pipelineName);
   const result = await runPipeline(
     {
@@ -453,6 +510,7 @@ async function executeResolvedTarget(
         : {}),
       ...(args.jobs !== undefined ? { jobs: args.jobs } : {}),
       ...(args.forceGates ? { forceGates: true } : {}),
+      ...(options.shard ? { shard: options.shard } : {}),
       onStepStart: (info) => {
         reporter.stepStart(info);
         const step = resolved.config.steps[info.name];
@@ -570,10 +628,135 @@ function selectWorkspacesForRun(
   return { workspaces: selected, includeRoot: true };
 }
 
+interface ShardRequest {
+  /** The shard to run, or null for an unsharded run. */
+  readonly spec: ShardSpec | null;
+  /** Set for `--shard-plan`: print the plan for this many shards. */
+  readonly planTotal: number | null;
+}
+
+/**
+ * Read `--shard` (or `AGENT_HOOKS_SHARD`) and `--shard-plan`. An empty
+ * env var counts as unset, so a matrix can leave it blank for an
+ * unsharded job. Throws ShardSpecError on malformed input.
+ */
+export function resolveShardRequest(
+  args: Pick<RunArgs, "shard" | "shardPlan">,
+  env: Record<string, string>,
+): ShardRequest {
+  const fromFlag = args.shard !== undefined;
+  const raw = fromFlag ? args.shard : env[SHARD_ENV_VAR];
+  const spec =
+    raw !== undefined && raw.trim().length > 0
+      ? parseShardSpec(raw, fromFlag ? "--shard" : SHARD_ENV_VAR)
+      : null;
+  if (args.shardPlan === undefined) return { spec, planTotal: null };
+  if (args.shardPlan !== true) {
+    return { spec, planTotal: parseShardTotal(args.shardPlan) };
+  }
+  if (!spec) {
+    throw new ShardSpecError(
+      "--shard-plan needs a shard count: pass --shard-plan <n>, or --shard <i>/<n>",
+    );
+  }
+  return { spec, planTotal: spec.total };
+}
+
+/**
+ * The planner's view of one context's pipeline: the steps that survive
+ * the same filters `runPipeline` applies (tags, --skip/--only, skip
+ * directives), each with its sharding mode, weight and, for split steps,
+ * its targets. Change gates and preflight are not consulted: they are
+ * evaluated in whichever shard owns the step, so every shard computes
+ * the same plan before anything runs.
+ */
+async function planContextSteps(
+  context: ExecuteTargetOptions,
+): Promise<PlannedStep[]> {
+  const resolved = resolveTarget(context.loaded.config, context.target);
+  if (!resolved) return [];
+  const { config, pipelineName } = resolved;
+  const pipeline = config.pipelines[pipelineName];
+  if (!pipeline) return [];
+  const { only } = context.prepared.directives;
+  const { kept } = applyFilters(resolveSteps(config, pipeline), pipeline, {
+    skip: effectiveSkipSet(context.prepared, config),
+    ...(only.size > 0 ? { only } : {}),
+  });
+  const planned: PlannedStep[] = [];
+  for (const { name, step } of kept) {
+    const mode = stepShardMode(step);
+    const targets =
+      mode === "targets"
+        ? await resolveShardTargets({
+            name,
+            step,
+            files: filterByGlob(context.files, step.files),
+            filesSelected: context.prepared.filesSelected,
+            cwd: context.cwd,
+            repoRoot: context.prepared.repoRoot,
+          })
+        : null;
+    planned.push({
+      group: context.group,
+      step: name,
+      mode,
+      weight: stepWeight(step),
+      targets,
+    });
+  }
+  return planned;
+}
+
+async function runContexts(
+  contexts: readonly ExecuteTargetOptions[],
+  args: RunArgs,
+  deps: RunCommandDeps,
+  request: ShardRequest,
+  targetLabel: string,
+): Promise<number> {
+  let assign: ((context: ExecuteTargetOptions) => ExecuteTargetOptions) | null =
+    null;
+  if (request.spec !== null || request.planTotal !== null) {
+    const planned = (
+      await Promise.all(contexts.map((context) => planContextSteps(context)))
+    ).flat();
+    if (request.planTotal !== null) {
+      deps.write(
+        renderShardPlan(buildShardPlan(planned, request.planTotal), targetLabel),
+      );
+      return 0;
+    }
+    const spec = request.spec ?? { index: 1, total: 1 };
+    const plan = buildShardPlan(planned, spec.total);
+    assign = (context) => ({
+      ...context,
+      shard: assignmentFor(plan, context.group, spec),
+    });
+  }
+  const codes = await Promise.all(
+    contexts.map((context) =>
+      executeResolvedTarget(args, deps, assign ? assign(context) : context),
+    ),
+  );
+  return codes.find((code) => code !== 0) ?? 0;
+}
+
 export async function runCommand(
   args: RunArgs,
   deps: RunCommandDeps,
 ): Promise<number> {
+  let shardRequest: ShardRequest;
+  try {
+    shardRequest = resolveShardRequest(args, deps.env);
+  } catch (err) {
+    if (err instanceof ShardSpecError) {
+      deps.writeErr(`✗ ${err.message}\n`);
+      return 2;
+    }
+    throw err;
+  }
+
   let project: LoadedProject;
   try {
     if (deps.loadProject) {
@@ -615,14 +798,23 @@ export async function runCommand(
       }
       throw err;
     }
-    return executeResolvedTarget(args, deps, {
-      target: parsedTarget.target,
-      cwd: effectiveCwd,
-      loaded,
-      git,
-      files: prepared.files,
-      prepared,
-    });
+    return runContexts(
+      [
+        {
+          target: parsedTarget.target,
+          cwd: effectiveCwd,
+          loaded,
+          git,
+          files: prepared.files,
+          prepared,
+          group: "",
+        },
+      ],
+      args,
+      deps,
+      shardRequest,
+      parsedTarget.target,
+    );
   }
 
   for (const warning of project.warnings) {
@@ -657,45 +849,39 @@ export async function runCommand(
     routed.workspaces.map((entry) => [entry.workspace.relativePath, entry.workspaceFiles]),
   );
 
-  const runs: Promise<number>[] = [];
-  let sawAny = false;
+  const contexts: ExecuteTargetOptions[] = [];
 
   if (selection.includeRoot && resolveTarget(project.root.config, parsedTarget.target)) {
-    sawAny = true;
-    runs.push(
-      executeResolvedTarget(args, deps, {
-        target: parsedTarget.target,
-        cwd: project.repoRoot,
-        loaded: project.root,
-        git,
-        files: routed.rootFiles,
-        prepared,
-      }),
-    );
+    contexts.push({
+      target: parsedTarget.target,
+      cwd: project.repoRoot,
+      loaded: project.root,
+      git,
+      files: routed.rootFiles,
+      prepared,
+      group: ".",
+    });
   }
 
   for (const workspace of selection.workspaces) {
     if (!resolveTarget(workspace.config, parsedTarget.target)) continue;
-    sawAny = true;
-    runs.push(
-      executeResolvedTarget(args, deps, {
-        target: parsedTarget.target,
-        cwd: workspace.workspaceRoot,
-        loaded: workspace,
-        git: rebaseGitRunner(git, workspace),
-        files: workspaceFileMap.get(workspace.relativePath) ?? [],
-        prepared,
-      }),
-    );
+    contexts.push({
+      target: parsedTarget.target,
+      cwd: workspace.workspaceRoot,
+      loaded: workspace,
+      git: rebaseGitRunner(git, workspace),
+      files: workspaceFileMap.get(workspace.relativePath) ?? [],
+      prepared,
+      group: workspace.relativePath,
+    });
   }
 
-  if (!sawAny) {
+  if (contexts.length === 0) {
     deps.writeErr(formatUnknownTargetError(project.root, parsedTarget.target));
     return 2;
   }
 
-  const codes = await Promise.all(runs);
-  return codes.find((code) => code !== 0) ?? 0;
+  return runContexts(contexts, args, deps, shardRequest, parsedTarget.target);
 }
 
 // --- Commander registration ---------------------------------------------
@@ -950,6 +1136,14 @@ function addRunnerOptions(
       "--agent",
       "force prompt context to `agent` (always emit next-step blocks)",
     )
+    .option(
+      "--shard <index/total>",
+      "run only shard <index> of <total> (1-based, e.g. 2/4); env: AGENT_HOOKS_SHARD",
+    )
+    .option(
+      "--shard-plan [total]",
+      "print which steps and targets each shard runs, then exit without running",
+    )
     .action(async function (this: Command, ...actionArgs: unknown[]) {
       const flags: RunCliFlags = this.opts();
       const positional =
@@ -971,6 +1165,8 @@ function addRunnerOptions(
         // only set noPrompts when the user explicitly asked.
         ...(flags.prompts === false ? { noPrompts: true } : {}),
         ...(flags.agent ? { promptContext: "agent" } : {}),
+        ...(flags.shard !== undefined ? { shard: flags.shard } : {}),
+        ...(flags.shardPlan !== undefined ? { shardPlan: flags.shardPlan } : {}),
       };
       const code = await runCommand(args, deps);
       if (code !== 0) throw new ExitError(code);
@@ -991,6 +1187,9 @@ interface RunCliFlags {
   /** Commander inverts `--no-prompts` → `prompts: false`. */
   readonly prompts?: boolean;
   readonly agent?: boolean;
+  readonly shard?: string;
+  /** `true` for a bare `--shard-plan`, else the shard count. */
+  readonly shardPlan?: string | true;
 }
 
 export function registerRunCommand(
