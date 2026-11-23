@@ -345,41 +345,53 @@ describe("createGitRunner", () => {
   });
 
   test("changed() falls back to local main when origin/main is missing", async () => {
-    const { spawner, calls } = fakeSpawner({
-      "rev-parse --verify --quiet origin/main^{commit}": {
-        stdout: "",
-        exitCode: 1,
-      },
-      "rev-parse --verify --quiet main^{commit}": { stdout: "abc123\n" },
-      "merge-base abc123 HEAD": { stdout: "abc123\n" },
-      "diff --name-only --diff-filter=ACMRT abc123...HEAD": {
-        stdout: "src/y.ts\0",
-      },
-    });
-    const git = createGitRunner("/repo", spawner);
-    const result = await git.changed();
-    expect(result).toEqual(["src/y.ts"]);
-    // Verifies the fallback chain: tried origin/main, then main.
-    // Index 1+2 because the global -c core.quotePath=false prefix
-    // is at positions 1 and 2.
-    expect(calls[0]?.slice(0, 7)).toEqual([
-      "git",
-      "-c",
-      "core.quotePath=false",
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      "origin/main^{commit}",
-    ]);
-    expect(calls[1]?.slice(0, 7)).toEqual([
-      "git",
-      "-c",
-      "core.quotePath=false",
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      "main^{commit}",
-    ]);
+    // Outside CI there is no on-demand fetch of origin/main; clear the CI
+    // markers so this holds when the suite itself runs in GitHub Actions.
+    const saved = { GITHUB_ACTIONS: process.env.GITHUB_ACTIONS, CI: process.env.CI };
+    delete process.env.GITHUB_ACTIONS;
+    delete process.env.CI;
+    try {
+      const { spawner, calls } = fakeSpawner({
+        "rev-parse --verify --quiet origin/main^{commit}": {
+          stdout: "",
+          exitCode: 1,
+        },
+        "rev-parse --verify --quiet main^{commit}": { stdout: "abc123\n" },
+        "merge-base abc123 HEAD": { stdout: "abc123\n" },
+        "diff --name-only --diff-filter=ACMRT abc123...HEAD": {
+          stdout: "src/y.ts\0",
+        },
+      });
+      const git = createGitRunner("/repo", spawner);
+      const result = await git.changed();
+      expect(result).toEqual(["src/y.ts"]);
+      // Verifies the fallback chain: tried origin/main, then main.
+      // Index 1+2 because the global -c core.quotePath=false prefix
+      // is at positions 1 and 2.
+      expect(calls[0]?.slice(0, 7)).toEqual([
+        "git",
+        "-c",
+        "core.quotePath=false",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "origin/main^{commit}",
+      ]);
+      expect(calls[1]?.slice(0, 7)).toEqual([
+        "git",
+        "-c",
+        "core.quotePath=false",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "main^{commit}",
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test("changed() throws UnresolvableBaseRefError when no candidate exists", async () => {
