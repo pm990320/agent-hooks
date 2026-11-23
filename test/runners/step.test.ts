@@ -11,6 +11,7 @@ import {
   joinFilesBrace,
   joinFilesNewline,
   pickRunVariant,
+  resolveShardTargets,
   runStep,
   shellQuote,
   type ExecFn,
@@ -808,5 +809,148 @@ describe("runStep — env merge", () => {
     // into the runSingle env and into the template context. Step's env wins
     // over caller env on collision (spread order).
     expect(rec.calls[0]?.env).toMatchObject({ CALLER_VAR: "caller" });
+  });
+});
+
+// --- Sharding ------------------------------------------------------------
+
+describe("runStep — sharding", () => {
+  test("{shard}, {shard_index}, {shard_total} default to 1/1", () => {
+    const ctx = { cwd: "/r", repoRoot: "/r", env: {}, files: [] };
+    expect(applyTemplate("t --shard={shard} {shard_index} {shard_total}", ctx)).toBe(
+      "t --shard=1/1 1 1",
+    );
+    expect(
+      applyTemplate("t --shard={shard}", { ...ctx, shard: { index: 3, total: 4 } }),
+    ).toBe("t --shard=3/4");
+  });
+
+  test("commands see the shard as template vars and env vars", async () => {
+    const rec = recordExec();
+    await runStep(
+      baseOpts({
+        step: parseStep({ run: "vitest run --shard={shard}", invocation: "project" }),
+        shard: { index: 2, total: 3 },
+        env: { AGENT_HOOKS_SHARD: "2/3", KEEP: "1" },
+      }),
+      rec.exec,
+    );
+    expect(rec.calls[0]?.command).toBe("vitest run --shard=2/3");
+    expect(rec.calls[0]?.env).toMatchObject({
+      KEEP: "1",
+      AGENT_HOOKS_SHARD_INDEX: "2",
+      AGENT_HOOKS_SHARD_TOTAL: "3",
+    });
+    // The CLI's own input var must not reach a nested agent-hooks run.
+    expect(rec.calls[0]?.env.AGENT_HOOKS_SHARD).toBeUndefined();
+  });
+
+  test("targetFilter runs only this shard's per-file targets", async () => {
+    const rec = recordExec();
+    const result = await runStep(
+      baseOpts({
+        step: parseStep({ run: "shellcheck {file}", invocation: "per-file" }),
+        files: ["a.sh", "b.sh", "c.sh"],
+        targetFilter: new Set(["a.sh", "c.sh"]),
+      }),
+      rec.exec,
+    );
+    expect(result.status).toBe("passed");
+    expect(rec.calls.map((call) => call.command)).toEqual([
+      "shellcheck 'a.sh'",
+      "shellcheck 'c.sh'",
+    ]);
+  });
+
+  test("targetFilter keys per-directory targets by directory", async () => {
+    const rec = recordExec();
+    await runStep(
+      baseOpts({
+        step: parseStep({
+          run: "tf validate {dir}",
+          invocation: "per-directory",
+          "dir-from": "parent",
+        }),
+        files: ["a/main.tf", "b/main.tf"],
+        targetFilter: new Set(["b"]),
+      }),
+      rec.exec,
+    );
+    expect(rec.calls.map((call) => call.command)).toEqual(["tf validate 'b'"]);
+  });
+
+  test("a filter matching no targets skips the step", async () => {
+    const rec = recordExec();
+    const result = await runStep(
+      baseOpts({
+        step: parseStep({ run: "shellcheck {file}", invocation: "per-file" }),
+        files: ["a.sh"],
+        targetFilter: new Set(["z.sh"]),
+        shard: { index: 2, total: 2 },
+      }),
+      rec.exec,
+    );
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("no targets on shard 2/2");
+    expect(rec.calls).toHaveLength(0);
+  });
+});
+
+describe("resolveShardTargets", () => {
+  const perFile = parseStep({ run: "shellcheck {file}", invocation: "per-file" });
+
+  test("per-file targets are the files", async () => {
+    expect(
+      await resolveShardTargets(baseOpts({ step: perFile, files: ["b.sh", "a.sh"] })),
+    ).toEqual(["b.sh", "a.sh"]);
+  });
+
+  test("per-directory targets are the sorted directories", async () => {
+    const step = parseStep({
+      run: "x {dir}",
+      invocation: "per-directory",
+      "dir-from": "parent",
+    });
+    expect(
+      await resolveShardTargets(
+        baseOpts({ step, files: ["b/1.tf", "a/1.tf", "a/2.tf"] }),
+      ),
+    ).toEqual(["a", "b"]);
+  });
+
+  test("single-invocation cases resolve to null", async () => {
+    expect(
+      await resolveShardTargets(baseOpts({ step: parseStep({ run: "x {files}" }), files: ["a"] })),
+    ).toBeNull();
+    expect(
+      await resolveShardTargets(baseOpts({ step: perFile, files: ["a.sh"], projectForced: true })),
+    ).toBeNull();
+    expect(await resolveShardTargets(baseOpts({ step: perFile, files: [] }))).toBeNull();
+    expect(
+      await resolveShardTargets(
+        baseOpts({
+          step: parseStep({ run: "x {dir}", invocation: "per-marker-dir", marker: "nope.marker" }),
+          files: ["a/b.go"],
+          cwd: os.tmpdir(),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("area maps rewrite or collapse the targets", async () => {
+    const step = parseStep({
+      run: "x {file}",
+      invocation: "per-file",
+      areas: {
+        web: { when: "web/**", run: ["web/a.ts", "web/b.ts"] },
+      },
+      unmatched: "all",
+    });
+    expect(
+      await resolveShardTargets(baseOpts({ step, files: ["web/z.ts"] })),
+    ).toEqual(["web/a.ts", "web/b.ts"]);
+    expect(
+      await resolveShardTargets(baseOpts({ step, files: ["other.ts"] })),
+    ).toBeNull();
   });
 });

@@ -3,10 +3,16 @@ import { ConfigSchema, type Config } from "../../src/config/schema.ts";
 import {
   PipelineError,
   applyFilters,
+  applyShard,
   runPipeline,
   type PipelineOptions,
 } from "../../src/runners/pipeline.ts";
 import type { ExecFn, ExecInput } from "../../src/runners/step.ts";
+import {
+  assignmentFor,
+  buildShardPlan,
+  type PlannedStep,
+} from "../../src/runners/shard.ts";
 
 // --- Shared helpers ------------------------------------------------------
 
@@ -662,5 +668,104 @@ describe("PipelineError", () => {
     const err = new PipelineError("x", "not-found");
     expect(err.name).toBe("PipelineError");
     expect(err.code).toBe("not-found");
+  });
+});
+
+// --- Sharding ------------------------------------------------------------
+
+describe("runPipeline — sharding", () => {
+  function plannedCi(): PlannedStep[] {
+    return [
+      { group: "", step: "lint", mode: "whole", weight: 1, targets: null },
+      { group: "", step: "typecheck", mode: "whole", weight: 30, targets: null },
+      { group: "", step: "test", mode: "native", weight: 60, targets: null },
+      { group: "", step: "e2e", mode: "whole", weight: 100, targets: null },
+      { group: "", step: "build", mode: "whole", weight: 5, targets: null },
+    ];
+  }
+
+  test("applyShard without an assignment keeps everything", () => {
+    const config = baseConfig();
+    const entries = [{ name: "lint", step: config.steps["lint"]! }];
+    expect(applyShard(entries, undefined)).toEqual({ kept: entries, outcomes: [] });
+  });
+
+  test("every step runs in exactly one shard; native steps run in all", async () => {
+    const plan = buildShardPlan(plannedCi(), 2);
+    const ran = new Map<string, number>();
+    for (const index of [1, 2]) {
+      const rec = recordExec();
+      const result = await runPipeline(
+        baseOptions({ shard: assignmentFor(plan, "", { index, total: 2 }) }),
+        rec.exec,
+      );
+      expect(result.ok).toBe(true);
+      for (const outcome of result.steps) {
+        if (outcome.kind === "ran") {
+          ran.set(outcome.name, (ran.get(outcome.name) ?? 0) + 1);
+        } else {
+          expect(outcome.kind).toBe("skipped-by-shard");
+          expect(outcome.reason).toMatch(/^on shard [12]\/2$/);
+        }
+      }
+      // Native steps see their own shard.
+      const testCall = rec.calls.find((call) => call.command.startsWith("vitest"));
+      expect(testCall?.env.AGENT_HOOKS_SHARD_INDEX).toBe(String(index));
+    }
+    expect(Object.fromEntries(ran)).toEqual({
+      lint: 1,
+      typecheck: 1,
+      test: 2,
+      e2e: 1,
+      build: 1,
+    });
+  });
+
+  test("split steps run their own targets and report the rest", async () => {
+    const config = ConfigSchema.parse({
+      steps: {
+        sh: { run: "shellcheck {file}", invocation: "per-file", files: "**/*.sh" },
+      },
+      pipelines: { ci: { steps: ["sh"] } },
+    });
+    const files = ["a.sh", "b.sh", "c.sh"];
+    const plan = buildShardPlan(
+      [{ group: "", step: "sh", mode: "targets", weight: 1, targets: files }],
+      4,
+    );
+    const commands: string[] = [];
+    const reasons: string[] = [];
+    for (const index of [1, 2, 3, 4]) {
+      const rec = recordExec();
+      const result = await runPipeline(
+        {
+          pipelineName: "ci",
+          config,
+          files,
+          cwd: "/repo",
+          shard: assignmentFor(plan, "", { index, total: 4 }),
+        },
+        rec.exec,
+      );
+      commands.push(...rec.calls.map((call) => call.command));
+      const outcome = result.steps[0];
+      if (outcome?.kind === "skipped-by-shard") reasons.push(outcome.reason ?? "");
+    }
+    expect(commands.sort()).toEqual([
+      "shellcheck 'a.sh'",
+      "shellcheck 'b.sh'",
+      "shellcheck 'c.sh'",
+    ]);
+    expect(reasons).toEqual(["3 targets on shard 1/4, 2/4, 3/4"]);
+  });
+
+  test("a step the plan does not know runs rather than being lost", async () => {
+    const plan = buildShardPlan([], 2);
+    const rec = recordExec();
+    const result = await runPipeline(
+      baseOptions({ shard: assignmentFor(plan, "", { index: 2, total: 2 }) }),
+      rec.exec,
+    );
+    expect(result.steps.every((outcome) => outcome.kind === "ran")).toBe(true);
   });
 });

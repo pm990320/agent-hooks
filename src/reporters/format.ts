@@ -10,6 +10,7 @@ export function statusGlyph(outcome: StepOutcome): string {
   if (outcome.kind === "skipped-by-flag") return "⊘";
   if (outcome.kind === "skipped-by-gate") return "⊘";
   if (outcome.kind === "skipped-by-area") return "⊘";
+  if (outcome.kind === "skipped-by-shard") return "⧉";
   if (outcome.kind === "skipped-by-preflight") return "⚠";
   const result = outcome.result;
   if (!result) return "?";
@@ -31,6 +32,9 @@ export function statusLabel(outcome: StepOutcome): string {
   }
   if (outcome.kind === "skipped-by-area") {
     return `skipped by area (${outcome.reason ?? "no matching areas"})`;
+  }
+  if (outcome.kind === "skipped-by-shard") {
+    return `elsewhere (${outcome.reason ?? "another shard"})`;
   }
   if (outcome.kind === "skipped-by-preflight") {
     return `SKIPPED (missing: ${outcome.reason ?? "preflight"})`;

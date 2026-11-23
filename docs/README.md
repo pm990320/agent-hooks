@@ -15,6 +15,8 @@ whether to try it; this is for people using it.
 - [CLI reference](./cli.md) — every command, flag, and exit code
 - [Pipelines and steps](./pipelines-and-steps.md) — the execution
   model, scopes, invocation modes, and parallelism
+- [Sharding](./sharding.md) — split one pipeline run across parallel
+  CI jobs with `--shard i/n`
 - [Stack detection](./stack-detection.md) — auto-detected templates
   for bun, npm/pnpm/yarn, uv/poetry, cargo, go, deno, terraform,
   Helm, and KubeLinter

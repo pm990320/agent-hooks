@@ -178,6 +178,8 @@ steps:
 | `requires` | array | `[]` | Preflight checks — see [Step requires](#step-requires) |
 | `on-missing` | enum | context-dependent | What to do when `requires` fails |
 | `on-failure` | `fail` \| `warn` | `fail` | Whether a non-zero command exit fails the pipeline or is reported as informational |
+| `shard` | `whole` \| `targets` \| `native` | `targets` for per-file/per-directory/per-marker-dir, else `whole` | How `--shard` splits the step. See [sharding](./sharding.md) |
+| `weight` | number | `1` | Relative cost (e.g. typical seconds) used to balance shards |
 | `timeout-ms` | number | `0` | Hard timeout per step invocation (0 = unlimited). On expiry: SIGTERM, then SIGKILL after 1s, exit code 124 |
 | `artifacts` | string[] | auto | Paths to surface in the agent feedback prompt |
 | `prompts` | object | defaults | `on-success` / `on-failure` templates |

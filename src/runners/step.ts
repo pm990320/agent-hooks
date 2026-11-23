@@ -2,6 +2,13 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import type { Step } from "../config/schema.ts";
 import { resolveAreas, type AreaDecision } from "./areas.ts";
+import {
+  formatShard,
+  NO_SHARD,
+  shardEnv,
+  withoutShardInput,
+  type ShardSpec,
+} from "./shard.ts";
 
 // --- Public API ----------------------------------------------------------
 
@@ -48,6 +55,17 @@ export interface StepRunOptions {
   readonly env?: Record<string, string>;
   /** How child stdio reaches the parent. See ExecOutputMode. */
   readonly output?: ExecOutputMode;
+  /**
+   * The shard this run belongs to. Exposed to the command as `{shard}`,
+   * `{shard_index}`, `{shard_total}` and the `AGENT_HOOKS_SHARD*` env
+   * vars. Defaults to 1/1.
+   */
+  readonly shard?: ShardSpec;
+  /**
+   * For a fan-out step split across shards: the target keys (file for
+   * per-file, directory otherwise) this shard runs. Others are skipped.
+   */
+  readonly targetFilter?: ReadonlySet<string>;
 }
 
 export type ExecFn = (input: ExecInput) => Promise<ExecResult>;
@@ -129,11 +147,13 @@ export interface TemplateContext {
   readonly files: readonly string[];
   readonly file?: string;
   readonly dir?: string;
+  readonly shard?: ShardSpec;
 }
 
 /**
  * Substitute `{files}`, `{file}`, `{files_newline}`, `{glob}`, `{cwd}`,
- * `{env.NAME}` tokens in a command template. Unrecognized `{…}` tokens
+ * `{shard}`, `{shard_index}`, `{shard_total}`, `{env.NAME}` tokens in a
+ * command template. Unrecognized `{…}` tokens
  * are left untouched so shell brace expansions (e.g. `{a,b,c}`) still
  * pass through to the shell.
  *
@@ -151,6 +171,9 @@ export function applyTemplate(template: string, ctx: TemplateContext): string {
       if (key === "files_newline") return joinFilesNewline(ctx.files);
       if (key === "glob") return joinFilesBrace(ctx.files);
       if (key === "cwd") return shellQuote(ctx.cwd);
+      if (key === "shard") return formatShard(ctx.shard ?? NO_SHARD);
+      if (key === "shard_index") return String((ctx.shard ?? NO_SHARD).index);
+      if (key === "shard_total") return String((ctx.shard ?? NO_SHARD).total);
       if (
         key === "repo-root" ||
         key === "repo_root" ||
@@ -247,7 +270,11 @@ async function runSingle(
   exec: ExecFn,
   stdin?: string,
 ): Promise<StepInvocation> {
-  const env = { ...(options.env ?? {}), ...(options.step.env ?? {}) };
+  const env = {
+    ...withoutShardInput(options.env ?? {}),
+    ...(options.step.env ?? {}),
+    ...shardEnv(options.shard ?? NO_SHARD),
+  };
   const timeoutMs = options.step["timeout-ms"];
   const result = await exec({
     command,
@@ -278,6 +305,7 @@ function templateCtx(
     files,
     ...(file !== undefined ? { file } : {}),
     ...(dir !== undefined ? { dir } : {}),
+    ...(options.shard ? { shard: options.shard } : {}),
   };
 }
 
@@ -436,6 +464,41 @@ async function planInvocationTargets(
   );
 }
 
+function isFanOut(mode: Step["invocation"]): boolean {
+  return (
+    mode === "per-file" || mode === "per-directory" || mode === "per-marker-dir"
+  );
+}
+
+/** Stable key of a fan-out target: its file (per-file) or directory. */
+function targetKey(target: InvocationTarget): string {
+  return target.file ?? target.dir ?? "";
+}
+
+/**
+ * The target keys a fan-out step would invoke for these options, for the
+ * shard planner. Mirrors `runStep`'s dispatch: returns `null` whenever
+ * the step would make at most one invocation (non-fan-out mode, project
+ * or skip area decision, no files, no targets), so the planner
+ * treats it as a whole step.
+ */
+export async function resolveShardTargets(
+  options: StepRunOptions,
+): Promise<readonly string[] | null> {
+  const mode = deriveEffectiveMode(options.step, options.projectForced ?? false);
+  if (!isFanOut(mode)) return null;
+  let files = options.files;
+  const decision = resolveAreas(options.step, options.files);
+  if (decision) {
+    if (decision.kind !== "rewrite") return null;
+    files = decision.files;
+  }
+  if (files.length === 0) return null;
+  const targets = await planInvocationTargets({ ...options, files }, mode);
+  if (targets.length === 0) return null;
+  return targets.map(targetKey);
+}
+
 async function executeTargets(
   targets: readonly InvocationTarget[],
   runOptions: StepRunOptions,
@@ -451,11 +514,7 @@ async function executeTargets(
     return runSingle(command, runOptions, exec, target.stdin);
   };
 
-  if (
-    mode !== "per-file" &&
-    mode !== "per-directory" &&
-    mode !== "per-marker-dir"
-  ) {
+  if (!isFanOut(mode)) {
     const invocations: StepInvocation[] = [];
     for (const target of targets) {
       invocations.push(await runTarget(target));
@@ -610,6 +669,18 @@ export async function runStep(
       effectiveFiles,
     );
   }
-  const invocations = await executeTargets(targets, runOptions, exec, template, mode);
+  const filter = options.targetFilter;
+  const selected = filter
+    ? targets.filter((target) => filter.has(targetKey(target)))
+    : targets;
+  if (selected.length === 0) {
+    return skipped(
+      `no targets on shard ${formatShard(options.shard ?? NO_SHARD)}`,
+      startedAt,
+      areaDecision,
+      effectiveFiles,
+    );
+  }
+  const invocations = await executeTargets(selected, runOptions, exec, template, mode);
   return result(invocations, startedAt, onFailure, areaDecision, effectiveFiles);
 }

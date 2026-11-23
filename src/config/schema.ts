@@ -117,8 +117,37 @@ export const StepSchema = z
      * is surfaced in the step summary as "timed out after Xms".
      */
     "timeout-ms": z.number().int().nonnegative().default(0),
+    /**
+     * How `--shard i/n` splits this step. `whole` runs the step in exactly
+     * one shard (the default for single-invocation modes). `targets`
+     * spreads the step's files or directories across shards (the default,
+     * and only allowed, for per-file / per-directory / per-marker-dir).
+     * `native` runs the step in every shard and leaves the split to the
+     * tool, which reads `{shard}` or `AGENT_HOOKS_SHARD` (vitest
+     * --shard, playwright --shard, …).
+     */
+    shard: z.enum(["whole", "targets", "native"]).optional(),
+    /**
+     * Relative cost used to balance shards, e.g. the step's typical
+     * duration in seconds. Defaults to 1. For a `targets` step this is
+     * the cost of the whole step, shared evenly among its targets.
+     */
+    weight: z.number().positive().optional(),
   })
   .superRefine((step, ctx) => {
+    if (
+      step.shard === "targets" &&
+      step.invocation !== "per-file" &&
+      step.invocation !== "per-directory" &&
+      step.invocation !== "per-marker-dir"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["shard"],
+        message:
+          "shard: targets needs invocation per-file, per-directory or per-marker-dir",
+      });
+    }
     if (step.invocation === "per-directory" && step["dir-from"] === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

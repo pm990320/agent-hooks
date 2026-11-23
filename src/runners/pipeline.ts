@@ -8,6 +8,7 @@ import {
   type PreflightContext,
   type PreflightResolver,
 } from "./preflight.ts";
+import type { ShardAssignment } from "./shard.ts";
 import {
   runStep,
   type ExecFn,
@@ -52,6 +53,12 @@ export interface PipelineOptions {
   readonly preflightContext?: PreflightContext;
   /** Resolver for command/file/env preflight checks. */
   readonly preflightResolver?: PreflightResolver;
+  /**
+   * Run only this shard's share of the pipeline. Steps whose work is on
+   * other shards get a `skipped-by-shard` outcome; split steps run only
+   * their own targets. Omit for an unsharded run.
+   */
+  readonly shard?: ShardAssignment;
   /** Override child output handling for every step in this pipeline run. */
   readonly outputMode?: ExecOutputMode;
   /** Called just before a step's command is executed. */
@@ -66,7 +73,8 @@ export type StepOutcomeKind =
   | "skipped-by-flag"
   | "skipped-by-area"
   | "skipped-by-gate"
-  | "skipped-by-preflight";
+  | "skipped-by-preflight"
+  | "skipped-by-shard";
 
 export interface StepOutcome {
   readonly name: string;
@@ -96,9 +104,11 @@ export class PipelineError extends Error {
 interface StepEntry {
   readonly name: string;
   readonly step: Step;
+  /** Set when a shard runs only some of this step's targets. */
+  readonly targetFilter?: ReadonlySet<string>;
 }
 
-function resolveSteps(config: Config, pipeline: Pipeline): StepEntry[] {
+export function resolveSteps(config: Config, pipeline: Pipeline): StepEntry[] {
   return pipeline.steps.map((name) => {
     const step = config.steps[name];
     if (!step) {
@@ -188,6 +198,45 @@ export function applyFilters(
     kept.push(entry);
   }
 
+  return { kept, outcomes };
+}
+
+/**
+ * Drop steps whose work belongs to other shards and attach target
+ * filters to split steps. A step the plan does not know about (it
+ * cannot happen when the plan was built from the same filters) runs, so
+ * a planning bug can only double a check, never lose one.
+ */
+export function applyShard(
+  entries: readonly StepEntry[],
+  shard: ShardAssignment | undefined,
+): FilterResult {
+  if (!shard) return { kept: [...entries], outcomes: [] };
+  const kept: StepEntry[] = [];
+  const outcomes: StepOutcome[] = [];
+  for (const entry of entries) {
+    const decision = shard.steps.get(entry.name);
+    if (decision?.kind === "elsewhere") {
+      const where = decision.shards
+        .map((index) => `${String(index)}/${String(shard.spec.total)}`)
+        .join(", ");
+      outcomes.push({
+        name: entry.name,
+        kind: "skipped-by-shard",
+        tags: entry.step.tags,
+        reason:
+          decision.of > 1
+            ? `${String(decision.of)} targets on shard ${where}`
+            : `on shard ${where}`,
+      });
+      continue;
+    }
+    if (decision?.kind === "targets") {
+      kept.push({ ...entry, targetFilter: decision.targets });
+      continue;
+    }
+    kept.push(entry);
+  }
   return { kept, outcomes };
 }
 
@@ -281,6 +330,8 @@ async function runOneStep(
       ...(options.repoRoot ? { repoRoot: options.repoRoot } : {}),
       output: outputMode,
       ...(options.env ? { env: options.env } : {}),
+      ...(options.shard ? { shard: options.shard.spec } : {}),
+      ...(entry.targetFilter ? { targetFilter: entry.targetFilter } : {}),
     },
     exec,
   );
@@ -376,10 +427,13 @@ export async function runPipeline(
   }
 
   const allEntries = resolveSteps(options.config, pipeline);
-  const { kept, outcomes: filterOutcomes } = applyFilters(allEntries, pipeline, {
+  const filtered = applyFilters(allEntries, pipeline, {
     ...(options.skip ? { skip: options.skip } : {}),
     ...(options.only ? { only: options.only } : {}),
   });
+  const sharded = applyShard(filtered.kept, options.shard);
+  const kept = sharded.kept;
+  const filterOutcomes = [...filtered.outcomes, ...sharded.outcomes];
 
   const runOutcomes = pipeline.parallel
     ? await runInParallel(kept, options, exec, options.jobs ?? kept.length)
